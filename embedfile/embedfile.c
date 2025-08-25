@@ -11,10 +11,38 @@
 #include "third_party/sqlite/sqlite3.h"
 #include <string.h>
 
-#include <assert.h>
 #include <cosmo.h>
 #include <stdlib.h>
 #include <time.h>
+
+#define CHECK_SQLITE_NOT_OK(rc, db) \
+    do { \
+        if ((rc) != SQLITE_OK) { \
+            fprintf(stderr, "SQLite error: %s\n", sqlite3_errmsg(db)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+#define CHECK_SQLITE_NOT_DONE(rc, db) \
+    do { \
+        if ((rc) != SQLITE_DONE) { \
+            fprintf(stderr, "SQLite error: %s\n", sqlite3_errmsg(db)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+#define CHECK_SQLITE_NOT_ROW(rc, db) \
+    do { \
+        if ((rc) != SQLITE_ROW) { \
+            fprintf(stderr, "SQLite error: %s\n", sqlite3_errmsg(db)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+#define CHECK_ZSQL_NOT_NULL(zSql) \
+    do { \
+        if (!(zSql)) { \
+            fprintf(stderr, "Error: Cannot create SQL statement.\n"); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
 
 int64_t time_ms(void) {
     struct timespec ts;
@@ -32,32 +60,30 @@ int embedfile_sqlite3_init(sqlite3 *db) {
     int rc;
 
     rc = sqlite3_vec_init(db, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_lembed_init(db, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_csv_init(db, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_lines_init(db, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_create_function_v2(db, "embedfile_version", 0, SQLITE_DETERMINISTIC | SQLITE_UTF8,
                                     NULL, embedfile_version, NULL, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     if (!EMBEDFILE_MODEL) {
-        return SQLITE_OK;
+        fprintf(stderr, "Error: No model provided.\n");
+        exit(EXIT_FAILURE);
     }
     sqlite3_stmt *stmt;
     rc =
         sqlite3_prepare_v2(db, "insert into temp.lembed_models(model) values (?)", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        assert(rc == SQLITE_OK);
-        return rc;
-    }
-    sqlite3_bind_text(stmt, 1, EMBEDFILE_MODEL, -1, SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
+    rc = sqlite3_bind_text(stmt, 1, EMBEDFILE_MODEL, -1, SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
     sqlite3_step(stmt);
     rc = sqlite3_finalize(stmt);
-    assert(rc == SQLITE_OK);
-
+    CHECK_SQLITE_NOT_OK(rc, db);
     return rc;
 }
 
@@ -66,10 +92,11 @@ int table_exists(sqlite3 *db, const char *table) {
     sqlite3_stmt *stmt;
     rc =
         sqlite3_prepare_v2(db, "select ? in (select name from pragma_table_list)", -1, &stmt, NULL);
-    assert(rc == SQLITE_OK);
-    sqlite3_bind_text(stmt, 1, table, strlen(table), SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
+    rc = sqlite3_bind_text(stmt, 1, table, strlen(table), SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_step(stmt);
-    assert(rc == SQLITE_ROW);
+    CHECK_SQLITE_NOT_ROW(rc, db);
     int result = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return result;
@@ -103,34 +130,29 @@ int default_model_dimensions(sqlite3 *db, int64_t *dimensions) {
     sqlite3_stmt *stmt;
     rc = sqlite3_prepare_v2(db, "select dimensions from lembed_models where name = ?", -1, &stmt,
                             NULL);
-    assert(rc == SQLITE_OK);
-
-    sqlite3_bind_text(stmt, 1, "default", -1, SQLITE_STATIC);
-
+    CHECK_SQLITE_NOT_OK(rc, db);
+    rc = sqlite3_bind_text(stmt, 1, "default", -1, SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_step(stmt);
     if(rc == SQLITE_DONE) {
       return SQLITE_EMPTY;
     }
-
-    assert(rc == SQLITE_ROW);
+    CHECK_SQLITE_NOT_ROW(rc, db);
     *dimensions = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);
 
     return SQLITE_OK;
 }
 
-int cmd_search(char *dbPath, char *query) {
+int cmd_search(char *dbPath, char *query, int k) {
     int rc;
     sqlite3 *db;
     sqlite3_stmt *stmt;
     rc = sqlite3_open(dbPath, &db);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "could not open database");
-        return rc;
-    }
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     rc = embedfile_sqlite3_init(db);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     rc = sqlite3_prepare_v2(db, "\
     SELECT \
@@ -140,10 +162,10 @@ int cmd_search(char *dbPath, char *query) {
     WHERE name LIKE '%_embedding'; \
     ",
                             -1, &stmt, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     rc = sqlite3_step(stmt);
-    assert(rc == SQLITE_ROW);
+    CHECK_SQLITE_NOT_ROW(rc, db);
     char *sourceColumn = sqlite3_mprintf("%s", sqlite3_column_text(stmt, 0));
     char *embeddingsColumn = sqlite3_mprintf("%s", sqlite3_column_text(stmt, 1));
     sqlite3_finalize(stmt);
@@ -159,20 +181,21 @@ int cmd_search(char *dbPath, char *query) {
       AND k = ?   \
     ",
                                        sourceColumn, embeddingsColumn);
-    assert(zSql);
+    CHECK_ZSQL_NOT_NULL(zSql);
     rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
     sqlite3_free((void *)zSql);
-    assert(rc == SQLITE_OK);
-
-    sqlite3_bind_text(stmt, 1, query, strlen(query), SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, 10);
+    CHECK_SQLITE_NOT_OK(rc, db);
+    rc = sqlite3_bind_text(stmt, 1, query, strlen(query), SQLITE_STATIC);
+    CHECK_SQLITE_NOT_OK(rc, db);
+    rc = sqlite3_bind_int64(stmt, 2, k);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     while (1) {
         rc = sqlite3_step(stmt);
         if (rc == SQLITE_DONE) {
             break;
         }
-        assert(rc == SQLITE_ROW);
+        CHECK_SQLITE_NOT_ROW(rc, db);
 
         printf("%lld %f %.*s\n", sqlite3_column_int64(stmt, 0), sqlite3_column_double(stmt, 2),
                sqlite3_column_bytes(stmt, 1), sqlite3_column_text(stmt, 1));
@@ -192,32 +215,31 @@ int cmd_embed(char *source) {
     sqlite3_stmt *stmt;
 
     rc = sqlite3_open(":memory:", &db);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     rc = embedfile_sqlite3_init(db);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     if (source) {
         rc = sqlite3_prepare_v2(db, "select vec_to_json(lembed(?))", -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
-
-        sqlite3_bind_text(stmt, 1, source, strlen(source), SQLITE_STATIC);
-
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(stmt, 1, source, strlen(source), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
         rc = sqlite3_step(stmt);
-        assert(rc == SQLITE_ROW);
+        CHECK_SQLITE_NOT_ROW(rc, db);
 
         printf("%.*s", sqlite3_column_bytes(stmt, 0), sqlite3_column_text(stmt, 0));
     } else {
         rc = sqlite3_prepare_v2(
             db, "select vec_to_json(lembed(line)) from lines_read('/dev/stdin')", -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
+        CHECK_SQLITE_NOT_OK(rc, db);
 
         while (1) {
             rc = sqlite3_step(stmt);
             if (rc == SQLITE_DONE) {
                 break;
             }
-            assert(rc == SQLITE_ROW);
+            CHECK_SQLITE_NOT_ROW(rc, db);
             printf("%.*s", sqlite3_column_bytes(stmt, 0), sqlite3_column_text(stmt, 0));
         }
     }
@@ -234,12 +256,6 @@ typedef enum {
     EF_IMPORT_SOURCE_TYPE_TXT,
     EF_IMPORT_SOURCE_TYPE_DB
 } ef_import_source_type;
-
-#define todo(msg) \
-    do { \
-        fprintf(stderr, "TODO: %s\n", msg); \
-        exit(EXIT_FAILURE); \
-    } while (0)
 
 struct aux {
     sqlite3_stmt *monitorStmt;
@@ -278,7 +294,7 @@ int monitor_stmt(sqlite3_stmt *stmt, int64_t total) {
                       "   FROM bytecode(?)"
                       "WHERE opcode = 'VUpdate'";
     rc = sqlite3_prepare_v2(sqlite3_db_handle(stmt), sql, -1, &monitorStmt, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, sqlite3_db_handle(stmt));
     struct aux x = {.monitorStmt = monitorStmt, .stmt = stmt, .total = total};
     x.started_at = time_ms();
     sqlite3_progress_handler(sqlite3_db_handle(stmt), 1000, progress, &x);
@@ -289,20 +305,6 @@ int monitor_stmt(sqlite3_stmt *stmt, int64_t total) {
 
     return sqlite3_finalize(stmt);
 }
-#define CHECK_SQLITE_NOT_OK(rc, db) \
-    do { \
-        if ((rc) != SQLITE_OK) { \
-            fprintf(stderr, "SQLite error: %s\n", sqlite3_errmsg(db)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while (0)
-#define CHECK_SQLITE_NOT_DONE(rc, db) \
-    do { \
-        if ((rc) != SQLITE_DONE) { \
-            fprintf(stderr, "SQLite error: %s\n", sqlite3_errmsg(db)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while (0)
 
 int cmd_import(int argc, char *argv[]) {
     char *embedColumn = NULL;
@@ -314,10 +316,16 @@ int cmd_import(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         char *arg = argv[i];
         if (sqlite3_stricmp(arg, "--embed") == 0) {
-            assert(++i <= argc);
+            if (++i >= argc) {
+                fprintf(stderr, "Error: Missing value for --embed.\n");
+                exit(EXIT_FAILURE);
+            }
             embedColumn = argv[i];
         } else if (sqlite3_stricmp(arg, "--table") == 0 || sqlite3_stricmp(arg, "-t") == 0) {
-            assert(++i <= argc);
+            if (++i >= argc) {
+                fprintf(stderr, "Error: Missing value for --table.\n");
+                exit(EXIT_FAILURE);
+            }
             table = argv[i];
         } else {
             if (!srcFile) {
@@ -325,13 +333,19 @@ int cmd_import(int argc, char *argv[]) {
             } else if (!indexFile) {
                 indexFile = argv[i];
             } else {
-                fprintf(stderr, "Error: unknown extra argument %s\n", argv[i]);
+                fprintf(stderr, "Error: Unknown extra argument %s.\n", argv[i]);
                 return 1;
             }
         }
     }
-    assert(srcFile);
-    assert(indexFile);
+    if (!srcFile) {
+        fprintf(stderr, "Error: No source file provided.\n");
+        exit(EXIT_FAILURE);
+    }
+    if (!indexFile) {
+        fprintf(stderr, "Error: No index db file provided.\n");
+        exit(EXIT_FAILURE);
+    }
 
     if (sqlite3_strlike("%csv", srcFile, 0) == 0) {
         source_type = EF_IMPORT_SOURCE_TYPE_CSV;
@@ -343,7 +357,10 @@ int cmd_import(int argc, char *argv[]) {
         source_type = EF_IMPORT_SOURCE_TYPE_TXT;
     } else if (sqlite3_strlike("%db", srcFile, 0) == 0) {
         source_type = EF_IMPORT_SOURCE_TYPE_DB;
-        assert(table);
+        if (!table) {
+            fprintf(stderr, "Error: No table provided.\n");
+            exit(EXIT_FAILURE);
+        }
     } else {
         fprintf(stderr, "Error: Couldn't determine type of source file %s\n", srcFile);
     }
@@ -351,18 +368,21 @@ int cmd_import(int argc, char *argv[]) {
     if (source_type == EF_IMPORT_SOURCE_TYPE_TXT) {
         embedColumn = "line";
     } else {
-        assert(embedColumn);
+        if (!embedColumn) {
+            fprintf(stderr, "Error: No embed column provided.\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     int rc;
     sqlite3 *db;
     rc = sqlite3_open(indexFile, &db);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = embedfile_sqlite3_init(db);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     rc = sqlite3_fileio_init(db, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     sqlite3_stmt *stmt;
     const char *zSql = NULL;
@@ -370,9 +390,9 @@ int cmd_import(int argc, char *argv[]) {
     case EF_IMPORT_SOURCE_TYPE_CSV: {
         zSql = sqlite3_mprintf(
             "CREATE VIRTUAL TABLE temp.source USING csv(filename=\"%w\", header=yes)", srcFile);
-        assert(zSql);
+        CHECK_ZSQL_NOT_NULL(zSql);
         rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
+        CHECK_SQLITE_NOT_OK(rc, db);
         break;
     }
     case EF_IMPORT_SOURCE_TYPE_JSON: {
@@ -380,8 +400,9 @@ int cmd_import(int argc, char *argv[]) {
         rc = sqlite3_prepare_v2(
             db, "select fullkey, key from json_each(json_extract(readfile(?), '$[0]'))", -1,
             &innerStmt, NULL);
-        assert(rc == SQLITE_OK);
-        sqlite3_bind_text(innerStmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(innerStmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
 
         sqlite3_str *sqlStr = sqlite3_str_new(NULL);
         sqlite3_str_appendf(sqlStr, "CREATE TABLE  temp.source AS SELECT rowid");
@@ -390,7 +411,7 @@ int cmd_import(int argc, char *argv[]) {
             if (rc == SQLITE_DONE) {
                 break;
             }
-            assert(rc == SQLITE_ROW);
+            CHECK_SQLITE_NOT_ROW(rc, db);
             sqlite3_str_appendf(sqlStr, ", value ->> %Q as \"%w\"",
                                 sqlite3_column_text(innerStmt, 0),
                                 sqlite3_column_text(innerStmt, 1));
@@ -399,10 +420,11 @@ int cmd_import(int argc, char *argv[]) {
 
         sqlite3_str_appendf(sqlStr, " FROM json_each(readfile(?))");
         zSql = sqlite3_str_finish(sqlStr);
-        assert(zSql);
+        CHECK_ZSQL_NOT_NULL(zSql);
         rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
-        sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
         break;
     }
     case EF_IMPORT_SOURCE_TYPE_NDJSON: {
@@ -410,8 +432,9 @@ int cmd_import(int argc, char *argv[]) {
         rc = sqlite3_prepare_v2(
             db, "select fullkey, key from json_each((select line from lines_read(?) limit 1))", -1,
             &innerStmt, NULL);
-        assert(rc == SQLITE_OK);
-        sqlite3_bind_text(innerStmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(innerStmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
 
         sqlite3_str *sqlStr = sqlite3_str_new(NULL);
         sqlite3_str_appendf(sqlStr, "CREATE TABLE  temp.source AS SELECT rowid");
@@ -420,7 +443,7 @@ int cmd_import(int argc, char *argv[]) {
             if (rc == SQLITE_DONE) {
                 break;
             }
-            assert(rc == SQLITE_ROW);
+            CHECK_SQLITE_NOT_ROW(rc, db);
             sqlite3_str_appendf(sqlStr, ", line ->> %Q as \"%w\"",
                                 sqlite3_column_text(innerStmt, 0),
                                 sqlite3_column_text(innerStmt, 1));
@@ -429,33 +452,67 @@ int cmd_import(int argc, char *argv[]) {
 
         sqlite3_str_appendf(sqlStr, " FROM lines_read(?)");
         zSql = sqlite3_str_finish(sqlStr);
-        assert(zSql);
+        CHECK_ZSQL_NOT_NULL(zSql);
         rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
-        sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
         break;
     }
     case EF_IMPORT_SOURCE_TYPE_TXT: {
         zSql =
             sqlite3_mprintf("CREATE TABLE temp.source AS SELECT line FROM lines_read(?)", srcFile);
-        assert(zSql);
+        CHECK_ZSQL_NOT_NULL(zSql);
         rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
-        assert(rc == SQLITE_OK);
-        sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        rc = sqlite3_bind_text(stmt, 1, srcFile, strlen(srcFile), SQLITE_STATIC);
+        CHECK_SQLITE_NOT_OK(rc, db);
         break;
     }
     case EF_IMPORT_SOURCE_TYPE_DB: {
-        todo("handle db");
+        sqlite3 *srcDb;
+        rc = sqlite3_open(srcFile, &srcDb);
+        CHECK_SQLITE_NOT_OK(rc, srcDb);
+
+        sqlite3_stmt *checkStmt;
+        rc = sqlite3_prepare_v2(srcDb,
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", -1, &checkStmt, NULL);
+        CHECK_SQLITE_NOT_OK(rc, srcDb);
+        sqlite3_bind_text(checkStmt, 1, table, -1, SQLITE_STATIC);
+        rc = sqlite3_step(checkStmt);
+        CHECK_SQLITE_NOT_ROW(rc, srcDb);
+        sqlite3_finalize(checkStmt);
+
+        zSql = sqlite3_mprintf("ATTACH DATABASE %Q AS srcdb;", srcFile);
+        CHECK_ZSQL_NOT_NULL(zSql);
+        rc = sqlite3_exec(db, zSql, NULL, NULL, NULL);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        sqlite3_free((void *)zSql);
+    
+        zSql = sqlite3_mprintf("CREATE TABLE temp.source AS SELECT * FROM srcdb.%Q", table);
+        CHECK_ZSQL_NOT_NULL(zSql);
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        sqlite3_free((void *)zSql);
+        rc = sqlite3_step(stmt);
+        CHECK_SQLITE_NOT_DONE(rc, db);
+        sqlite3_finalize(stmt);
+    
+        zSql = sqlite3_mprintf("DETACH DATABASE srcdb;");
+        CHECK_ZSQL_NOT_NULL(zSql);
+        rc = sqlite3_exec(db, zSql, NULL, NULL, NULL);
+        CHECK_SQLITE_NOT_OK(rc, db);
+        sqlite3_free((void *)zSql);
         break;
     }
     default: {
-        todo("wut");
-        break;
+        fprintf(stderr, "Error: Bad import source type.\n");
+        exit(EXIT_FAILURE);
     }
     }
 
     rc = sqlite3_step(stmt);
-    assert(rc == SQLITE_DONE);
+    CHECK_SQLITE_NOT_DONE(rc, db);
     sqlite3_finalize(stmt);
     sqlite3_free((void *)zSql);
 
@@ -466,31 +523,31 @@ int cmd_import(int argc, char *argv[]) {
           fprintf(stderr, "ERROR: No embeddings model registed with embedfile yet. Try with the `--model path/to/model.gguf` flag.");
           return 1;
         }
-        assert(rc == SQLITE_OK);
+        CHECK_SQLITE_NOT_OK(rc, db);
 
         zSql =
             sqlite3_mprintf("CREATE VIRTUAL TABLE vec_items USING vec0( %w_embedding float[%lld])",
                             embedColumn, dimensions);
-        assert(zSql);
+        CHECK_ZSQL_NOT_NULL(zSql);
         rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
         sqlite3_free((void *)zSql);
-        assert(rc == SQLITE_OK);
+        CHECK_SQLITE_NOT_OK(rc, db);
         rc = sqlite3_step(stmt);
-        assert(rc == SQLITE_DONE);
+        CHECK_SQLITE_NOT_DONE(rc, db);
         sqlite3_finalize(stmt);
     }
 
     if (!table_exists(db, "items")) {
         rc = sqlite3_prepare_v2(db, "CREATE TABLE items AS SELECT * FROM temp.source LIMIT 0;", -1,
                                 &stmt, NULL);
-        assert(rc == SQLITE_OK);
+        CHECK_SQLITE_NOT_OK(rc, db);
         rc = sqlite3_step(stmt);
-        assert(rc == SQLITE_DONE);
+        CHECK_SQLITE_NOT_DONE(rc, db);
         sqlite3_finalize(stmt);
     }
 
     zSql = sqlite3_mprintf("INSERT INTO items SELECT * FROM temp.source;", embedColumn);
-    assert(zSql);
+    CHECK_ZSQL_NOT_NULL(zSql);
     rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
     sqlite3_free((void *)zSql);
     CHECK_SQLITE_NOT_OK(rc, db);
@@ -499,24 +556,24 @@ int cmd_import(int argc, char *argv[]) {
     sqlite3_finalize(stmt);
 
     zSql = sqlite3_mprintf("SELECT COUNT(*) from temp.source;", embedColumn);
-    assert(zSql);
+    CHECK_ZSQL_NOT_NULL(zSql);
     rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
     sqlite3_free((void *)zSql);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
     rc = sqlite3_step(stmt);
-    assert(rc == SQLITE_ROW);
+    CHECK_SQLITE_NOT_ROW(rc, db);
     int64_t n = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);
 
     rc = sqlite3_exec(db, "SELECT * FROM temp.source", NULL, NULL, NULL);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     zSql = sqlite3_mprintf("INSERT INTO vec_items SELECT rowid, lembed(\"%w\") FROM temp.source;",
                            embedColumn);
-    assert(zSql);
+    CHECK_ZSQL_NOT_NULL(zSql);
     rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
     sqlite3_free((void *)zSql);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 #define LIGHT_BLUE "\033[1;34m"
 #define GREEN "\033[0;32m"
 #define RESET "\033[0m"
@@ -525,7 +582,7 @@ int cmd_import(int argc, char *argv[]) {
     printf(LIGHT_BLUE "%s" RESET "\n", sqlite3_expanded_sql(stmt));
 
     rc = monitor_stmt(stmt, n);
-    assert(rc == SQLITE_OK);
+    CHECK_SQLITE_NOT_OK(rc, db);
 
     printf(GREEN "\u2714" RESET " %s imported into %s, %d items\n", srcFile, indexFile,
            sqlite3_changes(db));
@@ -551,7 +608,10 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         char *arg = argv[i];
         if (sqlite3_stricmp(arg, "--model") == 0 || sqlite3_stricmp(arg, "-m") == 0) {
-            assert(++i <= argc);
+            if (++i >= argc) {
+                fprintf(stderr, "Error: Missing value for --model.\n");
+                exit(EXIT_FAILURE);
+            }
             EMBEDFILE_MODEL = argv[i];
         } else if (sqlite3_stricmp(arg, "--version") == 0 || sqlite3_stricmp(arg, "-v") == 0) {
             fprintf(stderr,
@@ -572,18 +632,42 @@ int main(int argc, char **argv) {
         } else if (sqlite3_stricmp(arg, "embed") == 0) {
             return cmd_embed(i + 2 == argc ? argv[i + 1] : NULL);
         } else if (sqlite3_stricmp(arg, "search") == 0) {
-            assert(i + 3 == argc);
-            char *dbpath = argv[i + 1];
-            char *query = argv[i + 2];
-            return cmd_search(dbpath, query);
+            char *dbpath = NULL;
+            char *query = NULL;
+            int k = 10;
+            for (int j = i + 1; j < argc; j++) {
+                if (sqlite3_stricmp(argv[j], "--k") == 0 || sqlite3_stricmp(argv[j], "-k") == 0) {
+                    if (j + 1 >= argc) {
+                        fprintf(stderr, "Error: Missing value for --k.\n");
+                        exit(EXIT_FAILURE);
+                    }
+                    k = atoi(argv[++j]);
+                    if (k <= 0) {
+                        fprintf(stderr, "Error: --k must be a positive integer.\n");
+                        return 1;
+                    }
+                } else if (!dbpath) {
+                    dbpath = argv[j];
+                } else if (!query) {
+                    query = argv[j];
+                } else {
+                    fprintf(stderr, "Error: Unknown extra argument %s.\n", argv[j]);
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if (!dbpath || !query) {
+                fprintf(stderr, "Error: No database nor search query provided.\n");
+                exit(EXIT_FAILURE);
+            }
+            return cmd_search(dbpath, query, k);
         } else if (sqlite3_stricmp(arg, "import") == 0) {
             return cmd_import(argc - i, argv + i);
         } else {
-            printf("Unknown arg %s\n", arg);
-            return 1;
+            fprintf(stderr, "Error: Unknown argument %s.\n", arg);
+            exit(EXIT_FAILURE);
         }
     }
 
-    fprintf(stderr, "Usage: embedfile [sh | import | search]\n");
+    fprintf(stderr, "Usage: embedfile [--model MODEL_FILE] [embed [TEXT] | sh | import [--embed COLUMN] [--table NAME] SOURCE_FILE INDEX_DB | search [--k NUM] INDEX_DB QUERY]\n");
     return 0;
 }
