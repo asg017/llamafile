@@ -98,6 +98,7 @@ extern "C" {
         LLAMA_VOCAB_PRE_TYPE_BLOOM          = 23,
         LLAMA_VOCAB_PRE_TYPE_GPT3_FINNISH   = 24,
         LLAMA_VOCAB_PRE_TYPE_EXAONE         = 25,
+        LLAMA_VOCAB_PRE_TYPE_GPT4O          = 26,
     };
 
     enum llama_rope_type {
@@ -477,6 +478,9 @@ extern "C" {
 
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_rope_freq_scale_train(const struct llama_model * model);
+
+    // Get the quantization of the model
+    LLAMA_API int32_t llama_model_quant_str(const struct llama_model * model, char * buf, size_t buf_size);
 
     // Functions to access the model's GGUF metadata scalar values
     // - The functions return the length of the string on success, or -1 on failure

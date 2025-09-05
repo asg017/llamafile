@@ -9,11 +9,14 @@
 <div class="chat-container" id="chat-interface">
   <div class="chat-header">
     <h1>
-      <img src="chatbot.png" alt="[llamafile]" title="llamafile" width="64" height="64">
-      <span id="model">llamafile</span>
+      <img src="chatbot.png"
+           width="64" height="64"
+           class="logo" style="display:none"
+           alt="[llamafile]" title="llamafile">
+      <span id="model">loading...</span>
     </h1>
     <div class="menu-dropdown">
-      <button class="menu-trigger">▼</button>
+      <button class="menu-trigger"><img src="menu.svg" alt="[menu]"></button>
       <div class="menu">
         <button class="menu-item" id="chat-mode-switch">Switch to Completions Mode</button>
       </div>
@@ -24,23 +27,34 @@
       Loading...
     </div>
   </div>
+  <div id="prefill-status">
+    <div class="prefill-progress">
+      <div class="progress-bar"></div>
+    </div>
+  </div>
   <div class="chat-input-container noprint">
     <textarea class="chat-input" id="chat-input" placeholder="Type your message..." rows="1" autocomplete="off"></textarea>
-    <button class="send-button" id="send-button">Send</button>
-    <button class="stop-button" id="stop-button" style="display:none">Stop</button>
-    <button class="settings-button" id="settings-button" title="Settings">⚙️</button>
-    <button class="redo-button" id="redo-button" title="Redo last message">↺</button>
+    <div class="chat-input-button-container">
+      <button class="send-button" id="send-button">Send</button>
+      <button class="stop-button" id="stop-button" style="display:none">Stop</button>
+      <div class="chat-input-button-row">
+        <button class="settings-button" id="settings-button" title="Settings"><img src="gear.svg" alt="[settings]"></button>
+        <button class="redo-button" id="redo-button" title="Redo last message"><img src="redo.svg" alt="[redo]"></button>
+        <button class="upload-button" id="upload-button" title="Upload"><img src="upload.svg" alt="[upload]"  ></button>
+        <input type="file" id="file-upload" style="display: none">
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="completions-container" id="completions-interface" style="display:none">
   <div class="chat-header">
     <h1>
-      <img src="chatbot.png" alt="[llamafile]" title="llamafile" width="64" height="64">
+      <img src="chatbot.png" class="logo" alt="[llamafile]" title="llamafile" width="64" height="64">
       <span id="model-completions">llamafile</span>
     </h1>
     <div class="menu-dropdown">
-      <button class="menu-trigger">▼</button>
+      <button class="menu-trigger"><img src="menu.svg" alt="[menu]"></button>
       <div class="menu">
         <button class="menu-item" id="completions-mode-switch">Switch to Chat Mode</button>
       </div>
@@ -51,7 +65,7 @@
     <div class="completions-controls">
       <button class="complete-button" id="complete-button">Complete</button>
       <button class="stop-button" id="completions-stop-button" style="display:none">Stop</button>
-      <button class="settings-button" id="completions-settings-button" title="Settings">⚙️</button>
+      <button class="settings-button" id="completions-settings-button" title="Settings"><img src="gear.svg" alt="[settings]"></button>
     </div>
   </div>
 </div>
@@ -60,27 +74,29 @@
   <div class="settings-panel">
     <div class="settings-header">
       <h2>Model Settings</h2>
-      <button id="close-settings">×</button>
+      <button id="close-settings"><img src="close.svg" alt="[x]" width="24" height="24"></button>
     </div>
-    <div class="setting-item">
-      <label>temperature = <span id="temp-value">0.8</span></label>
-      <input type="range" id="temperature" min="0" max="2" step="0.01" value="0.8">
-      <p class="setting-description">How much randomness to use during sampling. Higher values improve improvisation, and lower values result in determinism.</p>
-    </div>
-    <div class="setting-item">
-      <label>top_p = <span id="top-p-value">0.95</span></label>
-      <input type="range" id="top-p" min="0.01" max="1" step="0.01" value="0.95">
-      <p class="setting-description">Controls diversity via nucleus sampling. Reduces the probability mass from which to sample.</p>
-    </div>
-    <div class="setting-item">
-      <label>presence_penalty = <span id="presence-value">0</span></label>
-      <input type="range" id="presence-penalty" class="penalty-range" min="-2" max="2" step="0.1" value="0">
-      <p class="setting-description">Positive values discourage repetition; negative values encourage it.</p>
-    </div>
-    <div class="setting-item">
-      <label>frequency_penalty = <span id="frequency-value">0</span></label>
-      <input type="range" id="frequency-penalty" class="penalty-range" min="-2" max="2" step="0.1" value="0">
-      <p class="setting-description">Penalizes new tokens based on their frequency in the text so far.</p>
+    <div class="settings-content">
+      <div class="setting-item">
+        <label>temperature = <span id="temp-value">0.8</span></label>
+        <input type="range" id="temperature" min="0" max="2" step="0.01" value="0.8">
+        <p class="setting-description">How much randomness to use during sampling. Higher values improve improvisation, and lower values result in determinism.</p>
+      </div>
+      <div class="setting-item">
+        <label>top_p = <span id="top-p-value">0.95</span></label>
+        <input type="range" id="top-p" min="0.01" max="1" step="0.01" value="0.95">
+        <p class="setting-description">Controls diversity via nucleus sampling. Reduces the probability mass from which to sample.</p>
+      </div>
+      <div class="setting-item">
+        <label>presence_penalty = <span id="presence-value">0</span></label>
+        <input type="range" id="presence-penalty" class="penalty-range" min="-2" max="2" step="0.1" value="0">
+        <p class="setting-description">Positive values discourage repetition; negative values encourage it.</p>
+      </div>
+      <div class="setting-item">
+        <label>frequency_penalty = <span id="frequency-value">0</span></label>
+        <input type="range" id="frequency-penalty" class="penalty-range" min="-2" max="2" step="0.1" value="0">
+        <p class="setting-description">Penalizes new tokens based on their frequency in the text so far.</p>
+      </div>
     </div>
   </div>
 </div>

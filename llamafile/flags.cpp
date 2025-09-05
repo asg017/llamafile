@@ -52,8 +52,11 @@ bool FLAG_recompile = false;
 bool FLAG_tinyblas = false;
 bool FLAG_trace = false;
 bool FLAG_unsecure = false;
+bool FLAG_v2 = false;
 const char *FLAG_chat_template = "";
 const char *FLAG_db = nullptr;
+const char *FLAG_db_startup_sql = "PRAGMA journal_mode=WAL;"
+                                  "PRAGMA synchronous=NORMAL;";
 const char *FLAG_file = nullptr;
 const char *FLAG_ip_header = nullptr;
 const char *FLAG_listen = "127.0.0.1:8080";
@@ -63,12 +66,15 @@ const char *FLAG_prompt = nullptr;
 const char *FLAG_url_prefix = "";
 const char *FLAG_www_root = "/zip/www";
 double FLAG_token_rate = 1;
+float FLAG_decay_growth = .01;
 float FLAG_frequency_penalty = 0;
 float FLAG_presence_penalty = 0;
+float FLAG_reserve_tokens = .15;
 float FLAG_temperature = .8;
 float FLAG_top_p = .95;
-int FLAG_batch = 2048;
+int FLAG_batch = 256;
 int FLAG_ctx_size = 8192;
+int FLAG_decay_delay = 60 * 5;
 int FLAG_flash_attn = false;
 int FLAG_gpu = 0;
 int FLAG_http_ibuf_size = 5 * 1024 * 1024;
@@ -155,6 +161,11 @@ void llamafile_get_flags(int argc, char **argv) {
         //////////////////////////////////////////////////////////////////////
         // chatbot flags
 
+        if (!strcmp(flag, "--v2")) {
+            FLAG_v2 = true;
+            continue;
+        }
+
         if (!strcmp(flag, "--ascii")) {
             FLAG_ascii = true;
             continue;
@@ -186,6 +197,13 @@ void llamafile_get_flags(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(flag, "--prompt") || !strcmp(flag, "--system-prompt")) {
+            if (i == argc)
+                missing("--prompt");
+            FLAG_prompt = argv[i++];
+            continue;
+        }
+
         if (!strcmp(flag, "--db")) {
             if (i == argc)
                 missing("--db");
@@ -193,8 +211,18 @@ void llamafile_get_flags(int argc, char **argv) {
             continue;
         }
 
+        if (!strcmp(flag, "--db-startup-sql")) {
+            if (i == argc)
+                missing("--db-startup-sql");
+            FLAG_db_startup_sql = argv[i++];
+            continue;
+        }
+
         //////////////////////////////////////////////////////////////////////
         // server flags
+
+        if (!strcmp(flag, "--server"))
+            continue;
 
         if (!strcmp(flag, "-l") || !strcmp(flag, "--listen")) {
             if (i == argc)
@@ -379,13 +407,6 @@ void llamafile_get_flags(int argc, char **argv) {
             continue;
         }
 
-        if (!strcmp(flag, "-s") || !strcmp(flag, "--slots")) {
-            if (i == argc)
-                missing("--slots");
-            FLAG_slots = atoi(argv[i++]);
-            continue;
-        }
-
         if (!strcmp(flag, "-m") || !strcmp(flag, "--model")) {
             if (i == argc)
                 missing("--model");
@@ -444,6 +465,54 @@ void llamafile_get_flags(int argc, char **argv) {
 
         if (!strcmp(flag, "--no-warmup")) {
             FLAG_warmup = false;
+            continue;
+        }
+
+        if (!strcmp(flag, "--reserve-tokens")) {
+            if (i == argc)
+                missing("--reserve-tokens");
+            const char *s = argv[i++];
+            if (strchr(s, '.')) {
+                float f = atof(s);
+                if (!(0 < f && f <= 1))
+                    error("--reserve-tokens FLOAT must be on the interval (0,1]");
+                FLAG_reserve_tokens = f;
+            } else {
+                int n = atoi(s);
+                if (!(1 <= n && n <= 100))
+                    error("--reserve-tokens INT must be between 1 and 100");
+                FLAG_reserve_tokens = n / 100.;
+            }
+            continue;
+        }
+
+        //////////////////////////////////////////////////////////////////////
+        // resource management flags
+
+        if (!strcmp(flag, "-s") || !strcmp(flag, "--slots")) {
+            if (i == argc)
+                missing("--slots");
+            FLAG_slots = atoi(argv[i++]);
+            continue;
+        }
+
+        if (!strcmp(flag, "--decay-delay")) {
+            if (i == argc)
+                missing("--decay-delay");
+            int n = atoi(argv[i++]);
+            if (!(0 <= n && n <= 31536000))
+                error("--decay-delay INT must be between 1 and 31536000");
+            FLAG_decay_delay = n;
+            continue;
+        }
+
+        if (!strcmp(flag, "--decay-growth")) {
+            if (i == argc)
+                missing("--decay-growth");
+            float n = atof(argv[i++]);
+            if (!(isnormal(n) && n > 0))
+                error("--decay-growth FLOAT must be greater than 0");
+            FLAG_decay_growth = n;
             continue;
         }
 

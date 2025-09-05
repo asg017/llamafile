@@ -1,21 +1,20 @@
-.Dd August 17, 2024
+.Dd November 30, 2024
 .Dt LLAMAFILER 1
 .Os Mozilla Ocho
 .Sh NAME
 .Nm llamafiler
-.Nd fast reliable embedding server
+.Nd fast reliable large language model server
 .Sh SYNOPSIS
 .Nm
 .Fl m Ar model.gguf
 .Op flags...
 .Sh DESCRIPTION
 .Nm
-is a brand new HTTP server for Large Language Models (LLMs). To date,
-its development has been focused on doing fewer things really well, and
-right now that's serving embeddings. It offers you 3.4x the performance,
-stronger security, client request prioritization, request preemption, as
-well as request isolation that helps ensure software bugs won't cause
-the whole server to crash.
+llamafiler is an HTTP server for Large Language Models (LLMs). It
+includes a web GUI for both chatbot and text completion. It can be your
+OpenAI API compatible embeddings / completions / chat completions
+server. It's able to more intelligently recycle context windows across
+multiple slots serving multiple clients.
 .Sh OPTIONS
 The following options are available:
 .Bl -tag -width indent
@@ -30,6 +29,31 @@ recommended that you run multiple instances of llamafiler behind a
 reverse proxy such as NGINX or Redbean.
 .It Fl mm Ar FNAME , Fl Fl mmproj Ar FNAME
 Path of vision model weights.
+.It Fl Fl db Ar FILE
+Specifies path of sqlite3 database.
+.Pp
+The default is
+.Pa ~/.llamafile/llamafile.sqlite3
+.It Fl ngl Ar N , Fl Fl gpu-layers Ar N , Fl Fl n-gpu-layers Ar N
+Specifies number of layers to offload to GPU.
+.Pp
+This flag must be passed in order to use GPU on systems with NVIDIA or
+AMD GPUs. If you're confident that you have enough VRAM, then you can
+pass
+.Fl ngl Ar 999
+to enable full offloading, since this number is automatically downtuned
+to however many number of layers the model has. If VRAM is limited, then
+the
+.Fl Fl verbose
+flag may be passed to learn how many layers the model has, e.g. 35,
+which can then be down-tuned until the out of memory error goes away.
+.Pp
+On Apple Silicon systems with Metal, GPU offloading is enabled by
+default. Since these GPUs use unified memory, they're treated as having
+a single layer; therefore, using values higher than 1 will be treated as
+1. You can pass
+.Fl ngl Ar 0
+to disable GPU offloading and run in CPU mode on Apple Metal systems.
 .It Fl l Ar HOSTPORT , Fl Fl listen Ar HOSTPORT
 Specifies the local [HOST:]PORT on which the HTTP server should listen.
 By default this is 0.0.0.0:8080 which means llamafiler will bind to port
@@ -53,15 +77,32 @@ resources, and control how much completion parallelism can happen.
 Please note that
 .Fl Fl ctx-size
 has a strong influence on how many slots can be created.
-.It Fl p Ar TEXT , Fl Fl prompt Ar TEXT
+.It Fl Fl decay-delay Ar INT
+Number of seconds a context window slot needs to be inactive before the
+system starts to strongly consider giving it to other clients. The
+default is 300 which is five minutes.
+.It Fl Fl decay-growth Ar FLOAT
+Sets slot decay growth factor. Context window slots are assigned in a
+least recently used fashion, based on the formula
+.EQ
+age + e sup {growth * (age - delay)}
+.EN
+.It Fl p Ar TEXT , Fl Fl prompt Ar TEXT , Fl Fl system-prompt Ar TEXT
 Specifies system prompt. This value is passed along to the web frontend.
-.It Fl Fl no-display-prompt Ar TEXT
+.It Fl Fl no-display-prompt
 Hide system prompt from web user interface.
+.It Fl Fl nologo
+Hide llamafile logo icon from web ui.
 .It Fl Fl url-prefix Ar URLPREFIX
 Specifies a URL prefix (subdirectory) under which the HTTP server will
 make the API accessible, e.g. /lamafiler. Useful when running llamafiler
 behind a reverse proxy such as NGINX or Redbean. By default, this is set
 to / (root).
+.It Fl Fl verbose
+Enable logging of diagnostic information. This flag is useful for
+learning more about the model and hardware. It can also be helpful for
+troubleshooting errors. We currently recommend that this flag be avoided
+in production since the llama.cpp logger may disrupt thread cancelation.
 .It Fl w Ar N , Fl Fl workers Ar N
 Number of HTTP client handling threads.
 .It Fl Fl trust Ar CIDR
@@ -130,7 +171,46 @@ supported by the host operating system. The default keepalive is 5.
 Size of HTTP output buffer size, in bytes. Default is 1048576.
 .It Fl Fl http-ibuf-size Ar N
 Size of HTTP input buffer size, in bytes. Default is 1048576.
-.Sh EXAMPLE
+.It Fl Fl chat-template Ar NAME
+Specifies or overrides chat template for model.
+.Pp
+Normally the GGUF metadata tokenizer.chat_template will specify this
+value for instruct models. This flag may be used to either override the
+chat template, or specify one when the GGUF metadata field is absent,
+which effectively forces the web ui to enable chatbot mode.
+.Pp
+Supported chat template names are: chatml, llama2, llama3, mistral
+(alias for llama2), phi3, zephyr, monarch, gemma, gemma2 (alias for
+gemma), orion, openchat, vicuna, vicuna-orca, deepseek, command-r,
+chatglm3, chatglm4, minicpm, deepseek2, or exaone3.
+.Pp
+It is also possible to pass the jinja2 template itself to this argument.
+Since llamafiler doesn't currently support jinja2, a heuristic will be
+used to guess which of the above templates the template represents.
+.It Fl Fl completion-mode
+Forces web ui to operate in completion mode, rather than chat mode.
+Normally the web ui chooses its mode based on the GGUF metadata. Base
+models normally don't define tokenizer.chat_template whereas instruct
+models do. If it's a base model, then the web ui will automatically use
+completion mode only, without needing to specify this flag. This flag is
+useful in cases where a prompt template is defined by the gguf, but it
+is desirable for the chat interface to be disabled.
+.It Fl Fl db-startup-sql Ar CODE
+Specifies SQL code that should be executed whenever connecting to the
+SQLite database. The default is the following code, which enables the
+write-ahead log.
+.Bd -literal -offset indent
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+.Ed
+.It Fl Fl reserve-tokens Ar N
+Percent of context window to reserve for predicted tokens. When the
+server runs out of context window, old chat messages will be forgotten
+until this percent of the context is empty. The default is 15%. If this
+is specified as a floating point number, e.g. 0.15, then it'll be
+multiplied by 100 to get the percent.
+.El
+.Sh EXAMPLES
 Here's an example of how you might start this server:
 .Pp
 .Dl "llamafiler -m all-MiniLM-L6-v2.F32.gguf"

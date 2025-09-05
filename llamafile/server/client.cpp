@@ -24,6 +24,7 @@
 #include "llamafile/server/server.h"
 #include "llamafile/server/time.h"
 #include "llamafile/server/tokenbucket.h"
+#include "llamafile/server/utils.h"
 #include "llamafile/server/worker.h"
 #include "llamafile/string.h"
 #include "llamafile/threadlocal.h"
@@ -227,6 +228,18 @@ Client::transport()
         }
     }
 
+    if (effective_ip_ != client_ip_) {
+        char name[17];
+        snprintf(name,
+                 sizeof(name),
+                 "%hhu.%hhu.%hhu.%hhu",
+                 effective_ip_ >> 24,
+                 effective_ip_ >> 16,
+                 effective_ip_ >> 8,
+                 effective_ip_);
+        set_thread_name(name);
+    }
+
     if (get_header("X-Priority") == "batch") {
         worker_->deprioritize();
     } else if (!effective_ip_trusted_) {
@@ -381,7 +394,6 @@ Client::append_http_response_message(char* p, int code, const char* reason)
 bool
 Client::send_response(char* p0, char* p, std::string_view content)
 {
-    cleanup();
     pthread_testcancel();
     should_send_error_if_canceled_ = false;
 
@@ -478,7 +490,7 @@ Client::send_response_chunk(const std::string_view content)
 
     // perform send system call
     ssize_t sent;
-    if ((sent = writev(fd_, iov, 3)) != bytes) {
+    if ((sent = safe_writev(fd_, iov, 3)) != bytes) {
         if (sent == -1 && errno != EAGAIN && errno != ECONNRESET)
             SLOG("writev failed %m");
         close_connection_ = true;
@@ -504,15 +516,14 @@ Client::send_response_finish()
     return send("0\r\n\r\n");
 }
 
-// writes raw data to socket
+// writes any old data to socket
 //
-// consider using the higher level methods like send_error(),
-// send_response(), send_response_start(), etc.
+// unlike send() this won't fail if binary content is detected.
 bool
-Client::send(const std::string_view s)
+Client::send_binary(const void* p, size_t n)
 {
     ssize_t sent;
-    if ((sent = write(fd_, s.data(), s.size())) != s.size()) {
+    if ((sent = write(fd_, p, n)) != n) {
         if (sent == -1 && errno != EAGAIN && errno != ECONNRESET)
             SLOG("write failed %m");
         close_connection_ = true;
@@ -521,7 +532,27 @@ Client::send(const std::string_view s)
     return true;
 }
 
-// writes two pieces of raw data to socket in single system call
+// writes non-binary data to socket
+//
+// consider using the higher level methods like send_error(),
+// send_response(), send_response_start(), etc.
+bool
+Client::send(const std::string_view s)
+{
+    iovec iov[1];
+    ssize_t sent;
+    iov[0].iov_base = (void*)s.data();
+    iov[0].iov_len = s.size();
+    if ((sent = safe_writev(fd_, iov, 1)) != s.size()) {
+        if (sent == -1 && errno != EAGAIN && errno != ECONNRESET)
+            SLOG("write failed %m");
+        close_connection_ = true;
+        return false;
+    }
+    return true;
+}
+
+// writes two pieces of non-binary data to socket in single system call
 //
 // consider using the higher level methods like send_error(),
 // send_response(), send_response_start(), etc.
@@ -534,7 +565,7 @@ Client::send2(const std::string_view s1, const std::string_view s2)
     iov[0].iov_len = s1.size();
     iov[1].iov_base = (void*)s2.data();
     iov[1].iov_len = s2.size();
-    if ((sent = writev(fd_, iov, 2)) != s1.size() + s2.size()) {
+    if ((sent = safe_writev(fd_, iov, 2)) != s1.size() + s2.size()) {
         if (sent == -1 && errno != EAGAIN && errno != ECONNRESET)
             SLOG("writev failed %m");
         close_connection_ = true;
@@ -642,9 +673,10 @@ Client::dispatcher()
     }
 
     // get request-uri path
+    char method[9] = { 0 };
     std::string_view p1 = path();
-    if (FLAG_verbose >= 2)
-        SLOG("request path %.*s", (int)p1.size(), p1.data());
+    WRITE64LE(method, msg_.method);
+    SLOG("%s %.*s", method, (int)p1.size(), p1.data());
     if (!p1.starts_with(FLAG_url_prefix)) {
         SLOG("path prefix mismatch");
         return send_error(404);
@@ -667,11 +699,15 @@ Client::dispatcher()
         return v1_completions();
     if (p1 == "v1/chat/completions")
         return v1_chat_completions();
+    if (p1 == "v1/models")
+        return v1_models();
     if (p1 == "slotz")
         return slotz();
     if (p1 == "flagz")
         return flagz();
 
+#if 0
+    // TODO: implement frontend for database
     if (p1 == "db/chats" || p1 == "db/chats/")
         return db_chats();
     if (p1.starts_with("db/chat/")) {
@@ -689,6 +725,7 @@ Client::dispatcher()
         if (id != -1)
             return db_messages(id);
     }
+#endif
 
     // serve static endpoints
     int infd;
@@ -755,12 +792,13 @@ Client::dispatcher()
             close_connection_ = true;
             return false;
         }
-        if (!send(std::string_view(buf, chunk))) {
+        if (!send_binary(buf, chunk)) {
             close_connection_ = true;
             return false;
         }
     }
-    SLOG("served %s", resolved_.c_str());
+    if (FLAG_verbose >= 1)
+        SLOG("served %s", resolved_.c_str());
     cleanup();
     return true;
 }

@@ -22,6 +22,7 @@ const DEFAULT_SYSTEM_PROMPT =
 const DEFAULT_FLAGZ = {
   "model": null,
   "prompt": null,
+  "nologo": false,
   "no_display_prompt": false,
   "frequency_penalty": 0,
   "presence_penalty": 0,
@@ -46,6 +47,8 @@ const completionsInput = document.getElementById("completions-input");
 const completeButton = document.getElementById("complete-button");
 const completionsSettingsButton = document.getElementById("completions-settings-button");
 const completionsStopButton = document.getElementById("completions-stop-button");
+const uploadButton = document.getElementById("upload-button");
+const fileUpload = document.getElementById("file-upload");
 
 let abortController = null;
 let disableAutoScroll = false;
@@ -59,9 +62,79 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substring(2);
 }
 
-function createMessageElement(content, role) {
+function wrapMessageElement(messageElement, role) {
+  const wrapper = document.createElement("div");
+  wrapper.appendChild(messageElement);
+  if (role == "assistant") {
+    const controlContainer = wrapper.appendChild(document.createElement("div"));
+    controlContainer.appendChild(createCopyButton(() => messageElement.textContent, () => messageElement.innerHTML));
+    controlContainer.appendChild(infoButton(wrapper));
+    controlContainer.classList.add("message-controls");
+  }
+  wrapper.classList.add("message-wrapper", role);
+  return wrapper;
+}
+
+function infoButton(container, stats) {
+  let button = container?.querySelector("#stats");
+  let statsElement = container?.querySelector("#info-container");
+  if (!button) {
+    button = document.createElement("button");
+    button.id = "stats";
+    button.innerText = "i";
+    button.style.fontFamily = "monospace";
+
+    statsElement = document.createElement("div");
+    statsElement.id = "info-container";
+    statsElement.className = "hidden";
+    container.append(statsElement);
+    button.addEventListener("click", () => {
+      const show = !button.classList.contains("toggled");
+      statsElement.classList.toggle("hidden", !show);
+      button.classList.toggle("toggled", show);
+      if (show)
+        requestAnimationFrame(() => scrollIntoViewIfNeeded(statsElement, container.parentElement));
+    });
+  }
+  button.style.display = stats ? "" : "none";
+  if (stats) {
+    const parts = [];
+    const promptDurationMs = stats.firstContentTime - stats.startTime;
+    const responseDurationMs = stats.endTime - stats.firstContentTime;
+    if (promptDurationMs > 0 && stats.promptTokenCount > 0) {
+      const tokensPerSecond = (stats.promptTokenCount / (promptDurationMs / 1000)).toFixed(2);
+      const durationString = promptDurationMs >= 1000 ? `${(promptDurationMs / 1000).toFixed(2)}s` : `${promptDurationMs}ms`;
+      parts.push(`Processed ${stats.promptTokenCount} input tokens in ${durationString} (${tokensPerSecond} tokens/s)`);
+    }
+    if (responseDurationMs > 0 && stats.reponseTokenCount > 0) {
+      const tokensPerSecond = (stats.reponseTokenCount / (responseDurationMs / 1000)).toFixed(2);
+      const durationString = responseDurationMs >= 1000 ? `${(responseDurationMs / 1000).toFixed(2)}s` : `${promptDurationMs}ms`;
+      parts.push(`Generated ${stats.reponseTokenCount} tokens in ${durationString} (${tokensPerSecond} tokens/s)`)
+    } else {
+      parts.push("Incomplete");
+    }
+    button.title = parts.join("\n");
+    statsElement.innerHTML = "";
+    parts.forEach(part => statsElement.appendChild(wrapInSpan(part + " ")));
+  }
+  return button;
+}
+
+function scrollIntoViewIfNeeded(elem, container) {
+  let rectElem = elem.getBoundingClientRect(), rectContainer = container.getBoundingClientRect();
+  if (rectElem.bottom > rectContainer.bottom) elem.scrollIntoView(false);
+  if (rectElem.top < rectContainer.top) elem.scrollIntoView();
+}
+
+function wrapInSpan(innerText) {
+  const span = document.createElement("span");
+  span.innerText = innerText;
+  return span;
+}
+
+function createMessageElement(content) {
   const messageDiv = document.createElement("div");
-  messageDiv.classList.add("message", role);
+  messageDiv.classList.add("message");
   let hdom = new HighlightDom(messageDiv);
   const high = new RenderMarkdown(hdom);
   high.feed(content);
@@ -70,8 +143,10 @@ function createMessageElement(content, role) {
 }
 
 function scrollToBottom() {
-  if (!disableAutoScroll)
-    document.getElementById("bottom").scrollIntoView({behavior: "instant"});
+  if (!disableAutoScroll) {
+    document.getElementById("bottom").scrollIntoView({ behavior: "instant" });
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
 }
 
 function onChatInput() {
@@ -93,19 +168,23 @@ function cleanupAfterMessage() {
 }
 
 function onWheel(e) {
-  if (e.deltaY < 0)
+  if (e.deltaY == undefined || e.deltaY < 0)
     disableAutoScroll = true;
 }
 
-async function handleChatStream(response) {
+async function handleChatStream(response, stats) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let currentMessageElement = createMessageElement("", "assistant");
-  chatMessages.appendChild(currentMessageElement);
-  let hdom = new HighlightDom(currentMessageElement);
-  const high = new RenderMarkdown(hdom);
+  let currentMessageElement = null;
+  let currentMessageWrapper = null;
+  let messageAppended = false;
+  let finishReason = null;
+  let hdom = null;
+  let high = null;
   streamingMessageContent = [];
+  const prefillStatus = document.getElementById('prefill-status');
+  const progressBar = prefillStatus.querySelector('.progress-bar');
 
   try {
     while (true) {
@@ -120,14 +199,46 @@ async function handleChatStream(response) {
         const line = lines[i].trim();
         if (line.startsWith("data: ")) {
           const data = line.slice(6);
-          if (data === "[DONE]")
+          if (data === "[DONE]") {
+            prefillStatus.style.display = "none";
             continue;
+          }
           try {
             const parsed = JSON.parse(data);
             const content = parsed.choices[0]?.delta?.content || "";
-            streamingMessageContent.push(content);
-            high.feed(content);
-            scrollToBottom();
+            finishReason = parsed.choices[0]?.finish_reason;
+
+            // handle prefill progress
+            if (parsed.x_prefill_progress !== undefined) {
+              prefillStatus.style.display = "flex";
+              progressBar.style.width = `${parsed.x_prefill_progress * 100}%`;
+            } else {
+              if (content && !stats.firstContentTime) {
+                // Finished parsing the prompt
+                stats.firstContentTime = Date.now();
+                prefillStatus.style.display = "none";
+              }
+            }
+
+            if (content && !messageAppended) {
+              currentMessageElement = createMessageElement("");
+              currentMessageWrapper = wrapMessageElement(currentMessageElement, "assistant");
+              chatMessages.appendChild(currentMessageWrapper);
+              hdom = new HighlightDom(currentMessageElement);
+              high = new RenderMarkdown(hdom);
+              messageAppended = true;
+            }
+
+            if (messageAppended && content) {
+              streamingMessageContent.push(content);
+              high.feed(content);
+              scrollToBottom();
+            }
+            if (parsed.usage) {
+              stats.endTime = Date.now()
+              stats.promptTokenCount = parsed.usage.prompt_tokens
+              stats.reponseTokenCount = parsed.usage.completion_tokens
+            }
           } catch (e) {
             console.error("Error parsing JSON:", e);
           }
@@ -142,7 +253,25 @@ async function handleChatStream(response) {
       console.error("Error reading stream:", error);
     }
   } finally {
-    high.flush();
+    if (messageAppended) {
+      stats.firstContentTime = stats.firstContentTime ?? Date.now();
+      stats.endTime = stats.endTime ?? Date.now();
+      infoButton(currentMessageWrapper, stats);
+      high.flush();
+      // we don't supply max_tokens, so "length" can
+      // only mean that we ran out of context window
+      if (finishReason === "length") {
+        let img = document.createElement("IMG");
+        img.className = "ooc";
+        img.src = "ooc.svg";
+        img.alt = "🚫";
+        img.title = "Message truncated due to running out of context window. Consider tuning --ctx-size and/or --reserve-tokens";
+        img.width = 16;
+        img.height = 16;
+        hdom.lastElement.appendChild(img);
+      }
+    }
+    prefillStatus.style.display = "none";
     cleanupAfterMessage();
   }
 }
@@ -163,7 +292,8 @@ function fixUploads(str) {
 
 async function sendMessage() {
   const message = fixUploads(chatInput.value.trim());
-  if (!message) return;
+  if (!message)
+    return;
 
   // disable input while processing
   chatInput.value = "";
@@ -176,8 +306,8 @@ async function sendMessage() {
   abortController = new AbortController();
 
   // add user message to chat
-  const userMessageElement = createMessageElement(message, "user");
-  chatMessages.appendChild(userMessageElement);
+  const userMessageElement = createMessageElement(message);
+  chatMessages.appendChild(wrapMessageElement(userMessageElement, "user"));
   scrollToBottom();
 
   // update chat history
@@ -185,6 +315,13 @@ async function sendMessage() {
 
   const settings = loadSettings();
   try {
+    const stats = {
+      startTime: Date.now(),      // Timestamp when the request started
+      firstContentTime: null, // Timestamp when the first content was received
+      endTime: null,        // Timestamp when the response was fully received
+      promptTokenCount: 0,  // Number of tokens in the prompt
+      reponseTokenCount: 0   // Number of tokens in the response
+    };
     const response = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -198,26 +335,30 @@ async function sendMessage() {
         top_p: settings.top_p,
         presence_penalty: settings.presence_penalty,
         frequency_penalty: settings.frequency_penalty,
-        stream: true
+        stream: true,
+        stream_options: {
+          include_usage: true
+        }
       }),
       signal: abortController.signal
     });
     if (response.ok) {
-      await handleChatStream(response);
+      await handleChatStream(response, stats);
       const lastMessage = streamingMessageContent.join("");
-      chatHistory.push({ role: "assistant", content: lastMessage });
+      if (lastMessage)
+        chatHistory.push({ role: "assistant", content: lastMessage });
     } else {
       console.error("sendMessage() failed due to server error", response);
-      chatMessages.appendChild(createMessageElement(
-        `Server replied with error code ${response.status} ${response.statusText}`,
+      chatMessages.appendChild(wrapMessageElement(createMessageElement(
+        `Server replied with error code ${response.status} ${response.statusText}`),
         "system"));
       cleanupAfterMessage();
     }
   } catch (error) {
     if (error.name !== "AbortError") {
       console.error("sendMessage() failed due to unexpected exception", error);
-      chatMessages.appendChild(createMessageElement(
-        "There was an error processing your request.",
+      chatMessages.appendChild(wrapMessageElement(createMessageElement(
+        "There was an error processing your request."),
         "system"));
     }
     cleanupAfterMessage();
@@ -307,23 +448,47 @@ async function fixImageDataUri(dataUri, maxLength = 1024 * 1024) {
 }
 
 async function onFile(file) {
-  if (!file.type.toLowerCase().startsWith('image/')) {
-    console.warn('Only image files are supported');
+  const reader = new FileReader();
+  if (file.type.toLowerCase().startsWith('image/')) {
+    reader.onloadend = async function() {
+      const description = file.name;
+      const realDataUri = await fixImageDataUri(reader.result);
+      const fakeDataUri = 'data:,placeholder/' + generateId();
+      uploadedFiles.push([fakeDataUri, realDataUri]);
+      insertText(chatInput, `![${description}](${fakeDataUri})`);
+    };
+    reader.readAsDataURL(file);
+  } else if (file.type.toLowerCase().startsWith('text/')) {
+    reader.onloadend = function() {
+      const content = reader.result;
+      insertText(chatInput, `\`\`\`\n${content}\n\`\`\``);
+    };
+    reader.readAsText(file);
+  } else {
+    alert('Only image and text files are supported');
     return;
   }
-  const reader = new FileReader();
-  reader.onloadend = async function() {
-    const description = file.name;
-    const realDataUri = await fixImageDataUri(reader.result);
-    const fakeDataUri = 'data:,placeholder/' + generateId();
-    uploadedFiles.push([fakeDataUri, realDataUri]);
-    insertText(chatInput, `![${description}](${fakeDataUri})`);
-  };
-  reader.readAsDataURL(file);
+}
+
+function checkSurroundingNewlines(text, pos) {
+  const beforeCaret = text.slice(0, pos);
+  const afterCaret = text.slice(pos);
+  const precedingNewlines = beforeCaret.match(/\n*$/)[0].length;
+  const followingNewlines = afterCaret.match(/^\n*/)[0].length;
+  return { precedingNewlines, followingNewlines };
 }
 
 function insertText(elem, text) {
   const pos = elem.selectionStart;
+  const isCodeBlock = text.includes('```');
+
+  if (isCodeBlock) {
+    const { precedingNewlines, followingNewlines } = checkSurroundingNewlines(elem.value, pos);
+    const needsLeadingNewlines = pos > 0 && precedingNewlines < 2 ? '\n'.repeat(2 - precedingNewlines) : '';
+    const needsTrailingNewlines = pos < elem.value.length && followingNewlines < 2 ? '\n'.repeat(2 - followingNewlines) : '';
+    text = needsLeadingNewlines + text + needsTrailingNewlines;
+  }
+
   elem.value = elem.value.slice(0, pos) + text + elem.value.slice(pos);
   const newPos = pos + text.length;
   elem.setSelectionRange(newPos, newPos);
@@ -369,6 +534,9 @@ function updateModelInfo() {
     document.getElementById("model").textContent = modelName;
     document.getElementById("model-completions").textContent = modelName;
   }
+  if (!flagz.nologo) {
+    document.querySelectorAll(".logo").forEach(logo => logo.style.display = "inline-block");
+  }
 }
 
 function startChat(history) {
@@ -377,8 +545,8 @@ function startChat(history) {
   for (let i = 0; i < chatHistory.length; i++) {
     if (flagz.no_display_prompt && chatHistory[i].role == "system")
       continue;
-    chatMessages.appendChild(createMessageElement(chatHistory[i].content,
-                                                  chatHistory[i].role));
+    chatMessages.appendChild(wrapMessageElement(createMessageElement(chatHistory[i].content),
+      chatHistory[i].role));
   }
   scrollToBottom();
 }
@@ -435,7 +603,7 @@ function updateSettingsDisplay(settings) {
   }
 }
 
-function setupSettings() {    
+function setupSettings() {
   settingsButton.addEventListener("click", () => {
     settingsModal.style.display = "flex";
     updateSettingsDisplay(loadSettings());
@@ -649,6 +817,17 @@ function setupCompletionsMode() {
   completionsInput.focus();
 }
 
+function onUploadButtonClick() {
+  fileUpload.click();
+}
+
+function onFileUploadChange(e) {
+  if (e.target.files[0]) {
+    onFile(e.target.files[0]);
+    e.target.value = '';
+  }
+}
+
 async function chatbot() {
   flagz = await fetchFlagz();
   updateModelInfo();
@@ -665,6 +844,7 @@ async function chatbot() {
   redoButton.addEventListener("click", onRedo);
   chatInput.addEventListener("input", onChatInput);
   chatInput.addEventListener("keydown", onKeyDown);
+  chatMessages.addEventListener("touchmove", onWheel);
   document.addEventListener("wheel", onWheel);
   document.addEventListener("dragenter", onDragBegin);
   document.addEventListener("dragover", onDragBegin);
@@ -672,6 +852,8 @@ async function chatbot() {
   document.addEventListener("drop", onDragEnd);
   document.addEventListener("drop", onDrop);
   document.addEventListener("paste", onPaste);
+  uploadButton.addEventListener("click", onUploadButtonClick);
+  fileUpload.addEventListener("change", onFileUploadChange);
 }
 
 chatbot();

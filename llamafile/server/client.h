@@ -85,6 +85,7 @@ struct Client
     bool read_content() __wur;
     bool send_continue() __wur;
     bool send(const std::string_view) __wur;
+    bool send_binary(const void*, size_t) __wur;
     void defer_cleanup(void (*)(void*), void*);
     bool send_error(int, const char* = nullptr);
     char* append_http_response_message(char*, int, const char* = nullptr);
@@ -115,6 +116,8 @@ struct Client
 
     bool v1_chat_completions() __wur;
     bool get_v1_chat_completions_params(V1ChatCompletionParams*) __wur;
+
+    bool v1_models() __wur;
 
     bool slotz() __wur;
     bool flagz() __wur;

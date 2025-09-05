@@ -46,6 +46,7 @@ struct V1CompletionParams
 {
     bool echo = false;
     bool stream = false;
+    bool stream_include_usage = false;
     long max_tokens = -1;
     long seed = _rand64();
     double top_p = 1;
@@ -75,7 +76,7 @@ struct V1CompletionParams
 struct V1CompletionState
 {
     std::vector<Atom> atoms;
-    std::string piece;
+    std::string piece = "";
 };
 
 struct V1CompletionResponse
@@ -248,6 +249,26 @@ Client::get_v1_completions_params(V1CompletionParams* params)
         if (!stream.isBool())
             return send_error(400, "stream field must be boolean");
         params->stream = stream.getBool();
+
+        // stream_options: object|null
+        //
+        // Options for the streaming response.
+        Json& stream_options = json["stream_options"];
+        if (!stream_options.isNull()) {
+            if (!stream_options.isObject())
+                return send_error(400, "stream_options field must be object");
+
+            // include_usage: bool|null
+            //
+            // Include usage also for streaming responses. The actual usage will be reported before
+            // the [DONE] message, but all chunks contain an empty usage field.
+            Json& include_usage = stream_options["include_usage"];
+            if (!include_usage.isNull()) {
+                if (!include_usage.isBool())
+                    return send_error(400, "include_usage field must be boolean");
+                params->stream_include_usage = include_usage.getBool();
+            }
+        }
     }
 
     // max_tokens: integer|null
@@ -402,6 +423,9 @@ Client::v1_completions()
     // turn text into tokens
     atomize(model_, &state->atoms, params->prompt, PARSE_SPECIAL);
 
+    // we don't support multiple images yet
+    state->atoms = remove_old_image_atoms(state->atoms);
+
     // find appropriate slot
     slot_ = worker_->server_->slots_->take(state->atoms);
     defer_cleanup(cleanup_slot, this);
@@ -438,6 +462,8 @@ Client::v1_completions()
         choice["delta"]["role"] = "assistant";
         choice["delta"]["content"] = "";
         response->json["created"] = timespec_real().tv_sec;
+        if (params->stream_include_usage)
+            response->json["usage"] = nullptr;
         response->content = make_event(response->json);
         choice.getObject().erase("delta");
         if (!send_response_chunk(response->content))
@@ -456,7 +482,7 @@ Client::v1_completions()
         llama_token id = llama_sampling_sample(sampler, slot_->ctx_, NULL);
         llama_sampling_accept(sampler, slot_->ctx_, id, DONT_APPLY_GRAMMAR);
         ++completion_tokens;
-        if (!slot_->eval_token(id)) {
+        if (slot_->eval_token(id) < 0) {
             SLOG("ran out of context window");
             break;
         }
@@ -469,18 +495,22 @@ Client::v1_completions()
             finish_reason = "stop";
             break;
         }
-        state->piece =
+        state->piece +=
           llamafile_token_to_piece(slot_->ctx_, id, DONT_RENDER_SPECIAL_TOKENS);
         if (!state->piece.empty()) {
             if (params->stream) {
-                char* p = append_http_response_message(obuf_.p, 200);
-                choice["text"] = state->piece;
-                response->json["created"] = timespec_real().tv_sec;
-                response->content = make_event(response->json);
-                if (!send_response_chunk(response->content))
-                    return false;
+                if (!ends_with_incomplete_utf8(state->piece)) {
+                    char* p = append_http_response_message(obuf_.p, 200);
+                    choice["text"] = state->piece;
+                    response->json["created"] = timespec_real().tv_sec;
+                    response->content = make_event(response->json);
+                    if (!send_response_chunk(response->content))
+                        return false;
+                    state->piece.clear();
+                }
             } else {
                 response->content += state->piece;
+                state->piece.clear();
             }
         }
     }
@@ -491,6 +521,12 @@ Client::v1_completions()
     if (params->stream) {
         choice["text"] = "";
         response->json["created"] = timespec_real().tv_sec;
+        if (params->stream_include_usage) {
+            Json& usage = response->json["usage"];
+            usage["prompt_tokens"] = prompt_tokens;
+            usage["completion_tokens"] = completion_tokens;
+            usage["total_tokens"] = completion_tokens + prompt_tokens;
+        }
         response->content = make_event(response->json);
         if (!send_response_chunk(response->content))
             return false;

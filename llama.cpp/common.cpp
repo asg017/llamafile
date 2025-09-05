@@ -217,6 +217,10 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         FLAG_fast = true;
         return true;
     }
+    if (arg == "--v2") {
+        FLAG_v2 = true;
+        return true;
+    }
     if (arg == "--iq") {
         FLAG_iq = true;
         return true;
@@ -311,9 +315,10 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         }
         return true;
     }
-    if (arg == "-p" || arg == "--prompt") {
+    if (arg == "-p" || arg == "--prompt" || arg == "--system-prompt") {
         CHECK_ARG
         params.prompt = argv[i];
+        FLAG_prompt = argv[i]; // [jart]
         return true;
     }
     if (arg == "-e" || arg == "--escape") {
@@ -632,6 +637,7 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
     if (arg == "-m" || arg == "--model") {
         CHECK_ARG
         params.model = argv[i];
+        FLAG_model = params.model.c_str(); // [jart]
         return true;
     }
     if (arg == "-md" || arg == "--model-draft") {

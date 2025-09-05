@@ -32,6 +32,7 @@
 #include "llamafile/server/worker.h"
 #include "llamafile/string.h"
 #include "llamafile/vector.h"
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <sys/resource.h>
@@ -45,6 +46,7 @@ namespace server {
 struct V1ChatCompletionParams
 {
     bool stream = false;
+    bool stream_include_usage = false;
     long max_tokens = -1;
     long seed = _rand64();
     double top_p = 1;
@@ -76,7 +78,7 @@ struct V1ChatCompletionState
 {
     std::string prompt;
     std::vector<Atom> atoms;
-    std::string piece;
+    std::string piece = "";
 };
 
 struct V1ChatCompletionResponse
@@ -163,6 +165,24 @@ make_event(const Json& json)
     return s;
 }
 
+static int
+has_images(const std::vector<Atom>& atoms)
+{
+    for (const Atom& atom : atoms)
+        if (atom.is_image())
+            return true;
+    return false;
+}
+
+static int
+count_bytes(const std::vector<llama_chat_msg>& messages)
+{
+    int n = 0;
+    for (const llama_chat_msg& message : messages)
+        n += message.content.size();
+    return n;
+}
+
 bool
 Client::get_v1_chat_completions_params(V1ChatCompletionParams* params)
 {
@@ -224,10 +244,41 @@ Client::get_v1_chat_completions_params(V1ChatCompletionParams* params)
             return send_error(400, "message must have string role");
         if (!is_legal_role(message["role"].getString()))
             return send_error(400, "message role not system user assistant");
-        if (!message["content"].isString())
-            return send_error(400, "message must have string content");
-        params->messages.emplace_back(message["role"].getString(),
-                                      message["content"].getString());
+
+        // Accept string or array for content
+        if (message["content"].isString()) {
+            if (message["content"].getString().empty())
+                return send_error(400, "message must not have empty content");
+            params->messages.emplace_back(message["role"].getString(),
+                                          message["content"].getString());
+        } else if (message["content"].isArray()) {
+            std::string combined_content;
+            std::vector<Json>& content_array = message["content"].getArray();
+            if (content_array.empty())
+                return send_error(400, "message content array must not be empty");
+            for (Json& part : content_array) {
+                if (!part.isObject() || !part["type"].isString())
+                    return send_error(400, "content array items must be objects with type");
+                std::string type = part["type"].getString();
+                if (type == "text") {
+                    if (!part["text"].isString())
+                        return send_error(400, "text part must have string text");
+                    combined_content += part["text"].getString();
+                } else if (type == "image_url") {
+                    if (!part["image_url"].isObject() || !part["image_url"]["url"].isString())
+                        return send_error(400, "image_url part must have url string");
+                    // TODO collect image data (?)
+                    // std::string image_url = part["image_url"]["url"].getString();
+                } else {
+                    return send_error(400, "unsupported content part type");
+                }
+            }
+            if (combined_content.empty())
+                return send_error(400, "message must not have empty content");
+            params->messages.emplace_back(message["role"].getString(), combined_content);
+        } else {
+            return send_error(400, "message content must be string or array");
+        }
     }
 
     // n: integer|null
@@ -255,6 +306,26 @@ Client::get_v1_chat_completions_params(V1ChatCompletionParams* params)
         if (!stream.isBool())
             return send_error(400, "stream field must be boolean");
         params->stream = stream.getBool();
+
+        // stream_options: object|null
+        //
+        // Options for the streaming response.
+        Json& stream_options = json["stream_options"];
+        if (!stream_options.isNull()) {
+            if (!stream_options.isObject())
+                return send_error(400, "stream_options field must be object");
+
+            // include_usage: bool|null
+            //
+            // Include usage also for streaming responses. The actual usage will be reported before
+            // the [DONE] message, but all chunks contain an empty usage field.
+            Json& include_usage = stream_options["include_usage"];
+            if (!include_usage.isNull()) {
+                if (!include_usage.isBool())
+                    return send_error(400, "include_usage field must be boolean");
+                params->stream_include_usage = include_usage.getBool();
+            }
+        }
     }
 
     // max_tokens: integer|null
@@ -456,18 +527,73 @@ Client::v1_chat_completions()
     V1ChatCompletionResponse* response = new V1ChatCompletionResponse;
     defer_cleanup(cleanup_response, response);
 
-    // add bos token if it's needed
-    if (llama_should_add_bos_token(model_))
-        state->atoms.emplace_back(llama_token_bos(model_));
+    // turn prompt into atom array that'll fit in context window
+    for (;;) {
+        // add bos token if it's needed
+        if (llama_should_add_bos_token(model_))
+            state->atoms.emplace_back(llama_token_bos(model_));
 
-    // turn text into tokens
-    state->prompt = llama_chat_apply_template(
-      model_, FLAG_chat_template, params->messages, ADD_ASSISTANT);
-    atomize(model_, &state->atoms, state->prompt, PARSE_SPECIAL);
+        // turn text into tokens
+        state->prompt = llama_chat_apply_template(
+          model_, FLAG_chat_template, params->messages, ADD_ASSISTANT);
+        atomize(model_, &state->atoms, state->prompt, PARSE_SPECIAL);
 
-    // find appropriate slot
-    slot_ = worker_->server_->slots_->take(state->atoms);
-    defer_cleanup(cleanup_slot, this);
+        // we don't support multiple images yet
+        state->atoms = remove_old_image_atoms(state->atoms);
+
+        // acquire best slot
+        if (!slot_) {
+            slot_ = worker_->server_->slots_->take(state->atoms);
+            defer_cleanup(cleanup_slot, this);
+        }
+
+        // check if image uploading is supported
+        if (!slot_->clip_ctx_ && has_images(state->atoms))
+            return send_error(400, "no_vision_model");
+
+        // check if we have enough context
+        int space = slot_->ctx_size();
+        int avail = space - space * FLAG_reserve_tokens;
+        int need = count_tokens(state->atoms);
+        unassert(avail > 0);
+        if (need <= avail)
+            break;
+
+        // calling atomize() again will append
+        state->atoms.clear();
+
+        // forget old messages to clear up space in context window
+        //
+        // to avoid calling tokenize quadratically, we use a crude byte
+        // count heuristic to determine how many messages to drop. this
+        // is needed since the client sends the whole history each time
+        unassert(!params->messages.empty());
+        int keep_msgs = params->messages[0].role == "system";
+        int max_forget_msgs = (int)params->messages.size() - (keep_msgs + 1);
+        if (max_forget_msgs <= 0) {
+            SLOG("ran out of chat messages to forget");
+            return send_error(400, "out_of_context_due_to_long_message");
+        }
+        int bytes = count_bytes(params->messages);
+        double percent_to_remember = (double)avail / need;
+        int bytes_to_delete = bytes * (1 - percent_to_remember);
+        auto first = params->messages.begin();
+        if (keep_msgs)
+            ++first;
+        auto last = first;
+        int bytes_deleted = 0;
+        int forgotten_msgs = 0;
+        do {
+            bytes_deleted += last->content.size();
+            ++forgotten_msgs;
+            ++last;
+        } while (bytes_deleted < bytes_to_delete &&
+                 forgotten_msgs < max_forget_msgs);
+        SLOG("forgot %d / %zu old messages",
+             forgotten_msgs,
+             params->messages.size());
+        params->messages.erase(first, last);
+    }
 
     // init sampling
     llama_sampling_context* sampler = create_sampler(params);
@@ -475,17 +601,11 @@ Client::v1_chat_completions()
         return send_error(500, "failed to create sampler");
     defer_cleanup(cleanup_sampler, sampler);
 
-    // prefill time
-    int prompt_tokens = 0;
-    if ((prompt_tokens = slot_->prefill(state->atoms)) < 0) {
-        SLOG("slot prefill failed: %s", Slot::describe_error(prompt_tokens));
-        return send_error(500, Slot::describe_error(prompt_tokens));
-    }
-
     // setup response json
     response->json["id"] = generate_id();
     response->json["object"] = "chat.completion";
     response->json["model"] = params->model;
+    response->json["x_prefill_progress"] = nullptr;
     response->json["system_fingerprint"] = slot_->system_fingerprint_;
     Json& choice = response->json["choices"][0];
     choice["index"] = 0;
@@ -500,7 +620,42 @@ Client::v1_chat_completions()
             return false;
         choice["delta"]["role"] = "assistant";
         choice["delta"]["content"] = "";
-        response->json["created"] = timespec_real().tv_sec;
+        if (params->stream_include_usage)
+            response->json["usage"] = nullptr;
+    }
+
+    // prefill time
+    int prompt_tokens = 0;
+    if (params->stream) {
+        auto progress_callback = [&](int processed, int total) {
+            if (processed < total) {
+                response->json["x_prefill_progress"] =
+                  static_cast<float>(processed) / total;
+                response->json["created"] = timespec_real().tv_sec;
+                response->content = make_event(response->json);
+                if (!send_response_chunk(response->content)) {
+                    return; // Note: Can't properly handle error in callback
+                }
+            }
+        };
+        prompt_tokens = slot_->prefill(state->atoms, progress_callback);
+    } else {
+        prompt_tokens = slot_->prefill(state->atoms);
+    }
+
+    if (prompt_tokens < 0) {
+        SLOG("slot prefill failed: %s", Slot::describe_error(prompt_tokens));
+        if (!params->stream) {
+            return send_error(500, Slot::describe_error(prompt_tokens));
+        } else {
+            close_connection_ = true;
+            return false;
+        }
+    }
+
+    // initialize response
+    if (params->stream) {
+        response->json.getObject().erase("x_prefill_progress");
         response->content = make_event(response->json);
         choice.getObject().erase("delta");
         if (!send_response_chunk(response->content))
@@ -519,7 +674,7 @@ Client::v1_chat_completions()
         llama_token id = llama_sampling_sample(sampler, slot_->ctx_, NULL);
         llama_sampling_accept(sampler, slot_->ctx_, id, APPLY_GRAMMAR);
         ++completion_tokens;
-        if (!slot_->eval_token(id)) {
+        if (slot_->eval_token(id) < 0) {
             SLOG("ran out of context window");
             break;
         }
@@ -532,29 +687,42 @@ Client::v1_chat_completions()
             finish_reason = "stop";
             break;
         }
-        state->piece =
+        state->piece +=
           llamafile_token_to_piece(slot_->ctx_, id, DONT_RENDER_SPECIAL_TOKENS);
         if (!state->piece.empty()) {
             if (params->stream) {
-                char* p = append_http_response_message(obuf_.p, 200);
-                choice["delta"]["content"] = state->piece;
-                response->json["created"] = timespec_real().tv_sec;
-                response->content = make_event(response->json);
-                choice.getObject().erase("delta");
-                if (!send_response_chunk(response->content))
-                    return false;
+                if (!ends_with_incomplete_utf8(state->piece)) {
+                    char* p = append_http_response_message(obuf_.p, 200);
+                    choice["delta"]["content"] = state->piece;
+                    response->json["created"] = timespec_real().tv_sec;
+                    response->content = make_event(response->json);
+                    choice.getObject().erase("delta");
+                    if (!send_response_chunk(response->content))
+                        return false;
+                    state->piece.clear();
+                }
             } else {
                 response->content += state->piece;
+                state->piece.clear();
             }
         }
     }
     choice["finish_reason"] = finish_reason;
+    SLOG("predicted %d tokens finished on %s", //
+         completion_tokens,
+         finish_reason);
 
     // finalize response
     cleanup_slot(this);
     if (params->stream) {
         choice["delta"]["content"] = "";
         response->json["created"] = timespec_real().tv_sec;
+        if (params->stream_include_usage) {
+            Json& usage = response->json["usage"];
+            usage["prompt_tokens"] = prompt_tokens;
+            usage["completion_tokens"] = completion_tokens;
+            usage["total_tokens"] = completion_tokens + prompt_tokens;
+        }
         response->content = make_event(response->json);
         choice.getObject().erase("delta");
         if (!send_response_chunk(response->content))

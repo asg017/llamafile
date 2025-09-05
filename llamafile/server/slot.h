@@ -17,6 +17,8 @@
 
 #pragma once
 #include <cosmo.h>
+#include <ctime>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -28,6 +30,8 @@ struct clip_ctx;
 
 namespace lf {
 namespace server {
+
+using ProgressCallback = std::function<void(int processed, int total)>;
 
 struct Atom;
 struct Image;
@@ -46,7 +50,9 @@ struct Slot
 
     static const char* describe_error(int);
 
+    int id_;
     Dll elem_;
+    time_t last_used_;
     llama_model* model_;
     clip_ctx* clip_ctx_ = nullptr;
     llama_context* ctx_ = nullptr;
@@ -54,15 +60,15 @@ struct Slot
     std::string system_fingerprint_;
 
     ~Slot();
-    explicit Slot(llama_model*);
+    Slot(int, llama_model*);
     int ctx_size() const;
     int ctx_used() const;
     bool start();
     int eval_token(int);
-    int eval_image(const std::string_view&);
-    int eval_tokens(const std::vector<int>&);
-    int eval_atoms(const std::vector<Atom>&);
-    int prefill(const std::vector<Atom>&);
+    int eval_tokens(const std::vector<int>&, const ProgressCallback& = nullptr);
+    int eval_image(const std::string_view&, const ProgressCallback& = nullptr);
+    int eval_atoms(const std::vector<Atom>&, const ProgressCallback& = nullptr);
+    int prefill(const std::vector<Atom>&, const ProgressCallback& = nullptr);
     void tokenize(std::vector<Atom>*, std::string_view, bool);
     void dump(std::string*);
 };

@@ -78,6 +78,19 @@ This endpoint supports the following features:
   will be named delta instead. It's assumed the client will reconstruct
   the full conversation.
 
+- `stream_options`: `object|null`
+
+  Options for streaming the API response. This parameter is only
+  applicable when `stream: true` is also specified. Default is `null`.
+
+  - `include_usage`: `boolean|null`
+
+    Whether to include usage statistics in the streaming response. Default is `false`.
+
+    If set to `true`, a `usage` field with the usage information will be
+    included in an additional empty chunk. Note that all other chunks will
+    also contain this field, but with `null` value.
+
 - `max_tokens`: `integer|null`
 
   Specifies an upper bound for the number of tokens that can be
@@ -106,13 +119,6 @@ This endpoint supports the following features:
   mean more randomness.
   
   We generally recommend altering this or top_p but not both.
-
-- `seed`: `integer|null`
-  
-  If specified, llamafiler will make its best effort to sample
-  deterministically, even when temperature is non-zero. This means that
-  repeated requests with the same seed and parameters should return the
-  same result.
 
 - `seed`: `integer|null`
   
